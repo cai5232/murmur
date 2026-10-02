@@ -276,7 +276,7 @@ system, calibrated to one thing only: how long she has been gone.
 
 ## License & attribution
 
-MIT licensed. The license legally requires keeping the copyright notice in
+CC BY-NC-SA 4.0 licensed. Non-commercial use only. The license legally requires keeping the copyright notice in
 copies and substantial portions. Beyond that, a request: **if you use,
 reference, or build on Murmur, please credit the source and original author
 (fishisfish0614).** This project grew out of one household's real life;
