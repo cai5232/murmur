@@ -178,6 +178,7 @@ def sleep_mode():
     import time as _t
     engine.sleeping = True
     engine.sleeping_since = _t.time()
+    engine._persist()  # survive restarts
     return {"sleeping": True}
 
 

@@ -55,6 +55,12 @@ class EmotionEngine:
         """Restore from a snapshot according to each dimension's `restore` strategy."""
         elapsed_min = (time.time() - saved.get("saved_at", time.time())) / 60
         interrupted = saved.get("end_type", "interrupted") == "interrupted"
+        # Carry presence and goodnight mode across restarts. Without this, a
+        # restart resets "last seen" to boot time and drops sleep mode, so an
+        # unattended reboot at dawn makes absence rules fire on a sleeping user.
+        self.last_input_at = saved.get("last_input_at") or self.last_input_at
+        self.sleeping_since = saved.get("sleeping_since", 0.0)
+        self.sleeping = bool(saved.get("sleeping")) and time.time() - self.sleeping_since < 12 * 3600
         self.state = {}
         for d, cfg in self.dims.items():
             old = saved.get("dimensions", {}).get(d, cfg.get("initial", 0.0))
@@ -85,6 +91,8 @@ class EmotionEngine:
             "mood": self.mood(),
             "last_input_at": self.last_input_at,
             "last_tick_at": self.last_tick_at,
+            "sleeping": getattr(self, "sleeping", False),
+            "sleeping_since": getattr(self, "sleeping_since", 0.0),
             "snapshot_version": self.snapshot_version,
             "peak_day": self.peak_day,
             "day_peaks": self.day_peaks,
