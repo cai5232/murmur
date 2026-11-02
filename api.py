@@ -176,9 +176,10 @@ def sleep_mode():
     goodnight_grace_minutes): trailing messages within the grace window
     don't lift sleep mode; saying goodnight again extends it."""
     import time as _t
-    engine.sleeping = True
-    engine.sleeping_since = _t.time()
-    engine._persist()  # survive restarts
+    with engine.lock:
+        engine.sleeping = True
+        engine.sleeping_since = _t.time()
+        engine._persist()  # survive restarts
     return {"sleeping": True}
 
 

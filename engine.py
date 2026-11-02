@@ -8,8 +8,11 @@ The engine is fully generic: everything that makes a character *someone*
 lives in the config file. `update()` does not care where a delta came from;
 it only applies the dynamics.
 """
+import functools
 import json
 import math
+import os
+import threading
 import time
 from pathlib import Path
 
@@ -20,6 +23,22 @@ DATA = BASE / "data"
 STATE_FILE = DATA / "state.json"
 EVENTS_FILE = DATA / "events.jsonl"
 SNAP_DIR = DATA / "snapshots"
+
+
+def _atomic_write(path, text):
+    """write_text truncates first; a crash mid-write left a half state.json
+    that failed to load on restart. Write a temp file, then rename over."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def wrapper(self, *a, **kw):
+        with self.lock:
+            return fn(self, *a, **kw)
+    return wrapper
 
 
 class EmotionEngine:
@@ -37,10 +56,15 @@ class EmotionEngine:
         self.day_peaks = {}       # flare-day multiplier; useful on their own too)
         DATA.mkdir(exist_ok=True)
         SNAP_DIR.mkdir(exist_ok=True)
+        # The ticker runs on the event-loop thread while sync endpoints run in
+        # FastAPI's threadpool, so both can mutate state at once. RLock because
+        # update() -> _persist() re-enters.
+        self.lock = threading.RLock()
         self._load_or_init()
 
     # ---------- persistence ----------
 
+    @_locked
     def _load_or_init(self):
         if STATE_FILE.exists():
             saved = json.loads(STATE_FILE.read_text())
@@ -81,8 +105,10 @@ class EmotionEngine:
         self.session_id = self._new_session_id()
 
     def _persist(self):
-        STATE_FILE.write_text(json.dumps(self._state_doc(), ensure_ascii=False, indent=1))
+        with self.lock:
+            _atomic_write(STATE_FILE, json.dumps(self._state_doc(), ensure_ascii=False, indent=1))
 
+    @_locked
     def _state_doc(self, end_type="running"):
         return {
             "character": self.character,
@@ -138,6 +164,7 @@ class EmotionEngine:
         headroom = (ceiling - v) / span if delta > 0 else (v - floor) / span
         return max(0.0, min(1.0, headroom * 2))  # no damping within half range
 
+    @_locked
     def update(self, dimensions, source="input", trigger=""):
         """Single entry point — every delta passes through the same three gates
         (momentum, saturation, per-step cap). Returns the deltas that actually
@@ -173,6 +200,7 @@ class EmotionEngine:
         self._persist()
         return applied
 
+    @_locked
     def tick(self):
         """Time-driven: decay all dimensions toward baseline, then fire any
         absence rules whose threshold was crossed since the last tick."""
@@ -292,6 +320,7 @@ class EmotionEngine:
         return [d for d, cfg in self.dims.items()
                 if cfg.get("restore") == "carry_if_interrupted"]
 
+    @_locked
     def end_session(self, end_type="graceful", carry=None):
         """graceful: `carry` names the dimensions whose values survive into the
         next session (a feeling worth sleeping on means the matter isn't
@@ -306,7 +335,7 @@ class EmotionEngine:
         doc["snapshot_version"] = self.snapshot_version
         snap = SNAP_DIR / f"snap_{self.snapshot_version:05d}_{end_type}.json"
         snap.write_text(json.dumps(doc, ensure_ascii=False, indent=1))
-        STATE_FILE.write_text(json.dumps(doc, ensure_ascii=False, indent=1))
+        _atomic_write(STATE_FILE, json.dumps(doc, ensure_ascii=False, indent=1))
         return doc
 
     # ---------- event log ----------
