@@ -11,9 +11,10 @@ import random
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, Query
+from pydantic import BaseModel, ConfigDict, Field
 
 from engine import EmotionEngine
 
@@ -47,19 +48,28 @@ app = FastAPI(title=f"Murmur ({engine.character})", lifespan=lifespan)
 
 
 class Delta(BaseModel):
-    source: str = "input"          # input | internal | absence
+    model_config = ConfigDict(allow_inf_nan=False)
+    source: Literal["input", "hook", "internal", "absence", "unanswered"] = "input"
     dimensions: dict[str, float]
     trigger: str = ""
     moved: bool = False            # a heart-skipping moment; adds a transient spike
+    event_id: str = Field(default="", max_length=128)
 
 
 class EndSession(BaseModel):
-    end_type: str = "graceful"
+    end_type: Literal["graceful", "interrupted"] = "graceful"
     carry: list[str] | None = None  # dims that survive a graceful goodbye
 
 
 @app.post("/emotion/update")
 def update(delta: Delta):
+    with engine.lock:
+        if delta.event_id and delta.event_id in engine.applied_events:
+            return {"applied": {}, "state": engine.state, "mood": engine.mood(), "duplicate": True}
+        return _apply_update(delta)
+
+
+def _apply_update(delta):
     global _moved_at
     if delta.moved:
         _moved_at = time.time()
@@ -69,7 +79,8 @@ def update(delta: Delta):
                                    ensure_ascii=False) + "\n")
         except Exception:
             pass  # failing to log must not break the spike itself
-    applied = engine.update(delta.dimensions, source=delta.source, trigger=delta.trigger)
+    applied = engine.update(delta.dimensions, source=delta.source, trigger=delta.trigger,
+                            event_id=delta.event_id)
     return {"applied": applied, "state": engine.state, "mood": engine.mood()}
 
 
@@ -132,7 +143,7 @@ def vitals():
 
 
 @app.get("/emotion/moved")
-def moved_log(n: int = 20):
+def moved_log(n: int = Query(default=20, ge=1, le=200)):
     """The spike is fleeting; the record stays."""
     if not MOVED_LOG.exists():
         return {"count": 0, "recent": []}
@@ -164,7 +175,7 @@ def mood():
 
 
 @app.get("/emotion/history")
-def history(n: int = 50):
+def history(n: int = Query(default=50, ge=1, le=200)):
     return engine.recent_events(n)
 
 
@@ -197,3 +208,4 @@ def snapshot(req: EndSession):
 def restore():
     engine._load_or_init()
     return engine._state_doc()
+

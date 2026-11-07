@@ -52,6 +52,7 @@ class EmotionEngine:
         self.last_tick_at = time.time()
         self.session_id = None
         self.snapshot_version = 0
+        self.applied_events = []
         self.peak_day = ""        # daily peaks per dimension (used by unanswered's
         self.day_peaks = {}       # flare-day multiplier; useful on their own too)
         DATA.mkdir(exist_ok=True)
@@ -78,7 +79,7 @@ class EmotionEngine:
     def _restore_from(self, saved):
         """Restore from a snapshot according to each dimension's `restore` strategy."""
         elapsed_min = (time.time() - saved.get("saved_at", time.time())) / 60
-        interrupted = saved.get("end_type", "interrupted") == "interrupted"
+        interrupted = saved.get("end_type", "interrupted") != "graceful"
         # Carry presence and goodnight mode across restarts. Without this, a
         # restart resets "last seen" to boot time and drops sleep mode, so an
         # unattended reboot at dawn makes absence rules fire on a sleeping user.
@@ -95,13 +96,14 @@ class EmotionEngine:
                 # An interrupted session keeps its unresolved feelings; a graceful
                 # goodbye returns them to baseline (the carry decision happens at
                 # session end — see end_session()).
-                self.state[d] = old if interrupted else cfg.get("initial", 0.0)
+                self.state[d] = old if interrupted or d in saved.get("carry", []) else cfg.get("initial", 0.0)
             else:  # "decayed": decay from the old value toward baseline by elapsed time
                 self.state[d] = self._decay_value(old, cfg, elapsed_min)
         self.history = {d: 0.0 for d in self.dims}
         self.snapshot_version = saved.get("snapshot_version", 0)
         self.peak_day = saved.get("peak_day", "")
         self.day_peaks = saved.get("day_peaks", {})
+        self.applied_events = saved.get("applied_events", [])[-10000:]
         self.session_id = self._new_session_id()
 
     def _persist(self):
@@ -122,6 +124,7 @@ class EmotionEngine:
             "snapshot_version": self.snapshot_version,
             "peak_day": self.peak_day,
             "day_peaks": self.day_peaks,
+            "applied_events": self.applied_events,
             "saved_at": time.time(),
             "end_type": end_type,
         }
@@ -165,11 +168,13 @@ class EmotionEngine:
         return max(0.0, min(1.0, headroom * 2))  # no damping within half range
 
     @_locked
-    def update(self, dimensions, source="input", trigger=""):
+    def update(self, dimensions, source="input", trigger="", event_id=""):
         """Single entry point — every delta passes through the same three gates
         (momentum, saturation, per-step cap). Returns the deltas that actually
         took effect."""
         applied = {}
+        if event_id and event_id in self.applied_events:
+            return applied
         for dim, delta in dimensions.items():
             if dim not in self.dims:
                 continue
@@ -197,6 +202,8 @@ class EmotionEngine:
             if time.time() - getattr(self, "sleeping_since", 0.0) > grace:
                 self.sleeping = False  # any sign of the user lifts sleep mode
         self._log_event(dimensions, applied, source, trigger)
+        if event_id:
+            self.applied_events = (self.applied_events + [event_id])[-10000:]
         self._persist()
         return applied
 
@@ -327,6 +334,7 @@ class EmotionEngine:
         settled). Everything else returns to baseline.
         interrupted: all values are preserved as-is in the snapshot."""
         doc = self._state_doc(end_type=end_type)
+        doc["carry"] = [d for d in (carry or []) if d in self.carryable_dims()]
         if end_type == "graceful" and carry is not None:
             for d in self.carryable_dims():
                 if d not in carry:
@@ -355,3 +363,4 @@ class EmotionEngine:
             return []
         lines = EVENTS_FILE.read_text().strip().splitlines()[-n:]
         return [json.loads(l) for l in lines]
+
